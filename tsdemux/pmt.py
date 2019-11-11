@@ -12,7 +12,7 @@ class PmtTableReader(PsiTableReader):
                  on_stream_added: Callable[[int, int, Es], None],
                  on_stream_removed: Callable[[int, int, Es], None]):
         super().__init__(pid, PsiTableReader.TABLE_ID_PMT)
-        self.log_prefix = "[PMT:%04d] " % self.pid
+        self.log_prefix = f"[PMT:0x{self.pid:04x}] "
         self.program_id = program_id
         self.prev_streams = {}
         self.streams = {}
@@ -38,7 +38,6 @@ class PmtTableReader(PsiTableReader):
         return True
 
     def on_new_version(self, version: int):
-        self.info(f"new version {version}")
         self.streams = {}
 
     def on_section(self, section_id: int, data: bytearray, crc32: int) -> bool:
@@ -49,7 +48,7 @@ class PmtTableReader(PsiTableReader):
             self.warning(f"section id should be 0, got {section_id}")
             return False
 
-        self.info(f"section {section_id} len: {data_len}")
+        self.verbose(f"section {section_id} len: {data_len}")
         if data_len < 4:
             self.error(f"section length should not be < 4 bytes, got {data_len}")
             return False
@@ -114,29 +113,26 @@ class PmtTableReader(PsiTableReader):
         return True
 
     def on_table_complete(self):
-        self.info(f"pmt {self.current_version} is now complete")
-
         self.info(f"============= PMT ({self.current_version}) =============")
         for pid, es in self.streams.items():
-            self.info(f"> {pid} ==> {es}")
+            self.info(f"> pid 0x{pid:04x} ==> {es}")
         self.info("===================================")
 
         for pid in self.streams.keys() - self.prev_streams.keys():
-            self.info(f'  [+] pid: {pid} : {self.streams[pid]}')
+            self.info(f'  [+] pid: 0x{pid:04x} : {self.streams[pid]}')
             self.on_stream_added(self.program_id, pid, self.streams[pid])
 
         for pid in self.prev_streams.keys() - self.streams.keys():
-            self.info(f'  [-] pid: {pid} : {self.prev_streams[pid]}')
+            self.info(f'  [-] pid: 0x{pid:04x} : {self.prev_streams[pid]}')
             self.on_stream_removed(self.program_id, pid, self.prev_streams[pid])
 
         for pid in self.streams.keys() & self.prev_streams.keys():
             prev_es = self.prev_streams[pid]
             es = self.streams[pid]
             if prev_es != es:
-                self.info(f'  [U] pid: {pid} => es changed from {prev_es} to {es}')
+                self.info(f'  [U] pid: 0x{pid:04x} => es changed from {prev_es} to {es}')
                 self.on_stream_removed(self.program_id, pid, self.prev_streams[pid])
                 self.on_stream_added(self.program_id, pid, self.streams[pid])
 
         self.prev_streams = self.streams.copy()
-        sys.exit(1)
 

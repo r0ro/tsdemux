@@ -26,9 +26,12 @@ class TsParser(LogEnabled):
         self.pid_handlers: Dict[int, TsReader] = {
             self.PAT_PID: PatTableReader(self.PAT_PID, self.on_program_added, self.on_program_removed)
         }
+        self.programs_pcr_pid = {}
+        self.programs_pcr = {}
 
-    def on_pcr_pid_changed(self, program_id: int, pid: int):
-        pass
+    def on_pcr_pid_changed(self, program_id: int, new_pid: int):
+        self.programs_pcr_pid[program_id] = new_pid
+        self.programs_pcr[program_id] = 0
 
     def on_stream_added(self, program_id: int, pid: int, es: Es):
         pass
@@ -43,7 +46,10 @@ class TsParser(LogEnabled):
                                                 self.on_stream_removed)
 
     def on_program_removed(self, program_id, pid):
-        del self.pid_handlers[pid]
+        if pid in self.pid_handlers:
+            del self.pid_handlers[pid]
+        if program_id in self.programs_pcr:
+            del self.programs_pcr[program_id]
 
     def decode_adaptation_field(self, pid, data):
         offset = 0
@@ -73,10 +79,12 @@ class TsParser(LogEnabled):
                    ((data[offset + 2] & 0xFF) << 9) |
                    ((data[offset + 3] & 0xFF) << 1) |
                    (((data[offset + 4] & 0xFF) >> 7) & 0x1)) / 90
-            self.info(f"PCR: {pcr}")
+            for program_id, pcr_pid in self.programs_pcr_pid.items():
+                if pcr_pid == pid:
+                    self.programs_pcr[program_id] = pcr
+                    self.verbose(f"Program {program_id} pcr: {pcr}")
 
     def parse_pkt(self, data):
-        self.verbose(f"pkt: {data.hex()}")
         offset = 1
 
         # read header
@@ -88,7 +96,7 @@ class TsParser(LogEnabled):
         continuity_counter = data[offset + 2] & 0xF
         offset += 3
 
-        discountinuity = False
+        discontinuity = False
 
         if pid == 0x1FFF:
             # skip padding packet
@@ -100,8 +108,7 @@ class TsParser(LogEnabled):
             self.warning("transport_error_indicator")
             return
 
-        self.debug("TS PKT [%06d|pid:0x%04x%s]" % (self.pkt_count, pid, pusi and "|PUSI" or ""))
-        self.debug(f"afield_ctrl: {afield_ctrl}")
+        self.verbose("TS PKT [%06d|pid:0x%04x%s]" % (self.pkt_count, pid, pusi and "|PUSI" or ""))
 
         # check if payload is present
         if (afield_ctrl & 0x1) == 0:
@@ -120,7 +127,7 @@ class TsParser(LogEnabled):
             if self.continuity_counters[pid] != continuity_counter:
                 self.warning("continuity check failed for PID 0x%02x (%02d vd %02d)" % (
                     pid, continuity_counter, self.continuity_counters[pid]))
-                discountinuity = True
+                discontinuity = True
                 self.continuity_counters[pid] = continuity_counter
 
         # skip adaptation field if present
@@ -138,7 +145,7 @@ class TsParser(LogEnabled):
             # skip adaptation field
             offset += afield_len
 
-        return pid, pusi, discountinuity, scrambled, data[offset:]
+        return pid, pusi, discontinuity, scrambled, data[offset:]
 
     def parse(self, stream):
         while True:
@@ -157,8 +164,6 @@ class TsParser(LogEnabled):
 
             pid, pusi, discountinuity, scrambled, payload = self.parse_pkt(ts_pkt)
 
-            self.verbose(f"payload: {payload.hex()}")
-
             if pid in self.pid_handlers:
                 self.pid_handlers[pid].read_payload(payload, pusi, scrambled, discountinuity)
 
@@ -168,6 +173,6 @@ class TsParser(LogEnabled):
 
 
 if __name__ == '__main__':
-    parser = TsParser(verbose=True)
+    parser = TsParser(verbose=False)
     with open('sample.ts', 'rb') as tsfile:
         parser.parse(tsfile)

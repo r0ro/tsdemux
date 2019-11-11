@@ -72,7 +72,6 @@ class PsiTableReader(LogEnabled, TsReader):
             return
 
         data_len = len(data)
-        self.info(f"push_data {data.hex()}")
 
         if self.payload_len + data_len >= self.MAX_TABLE_SIZE:
             self.error("section length is too big ... dropping")
@@ -86,7 +85,6 @@ class PsiTableReader(LogEnabled, TsReader):
         start = offset
         data = self.payload[offset:offset+section_length+3]
         table_id = self.payload[offset] & 0xFF
-        self.info(f"parse_section table_id: {table_id} {data.hex()}")
         section_syntax_indicator = self.payload[offset + 1] & 0x80 != 0
         private_indicator = self.payload[offset + 1] & 0x40 != 0
         crc_offset = offset + section_length - 4
@@ -138,7 +136,7 @@ class PsiTableReader(LogEnabled, TsReader):
             return True
 
         if version != self.current_version:
-            self.info(f"received a new version ({version} was {self.current_version}) of table {self.table_id}")
+            self.verbose(f"received a new version ({version} was {self.current_version}) of table {self.table_id}")
             self.handle_new_version(version)
 
         if cur_section > last_section:
@@ -162,13 +160,13 @@ class PsiTableReader(LogEnabled, TsReader):
 
         payload_length = section_length - 5 - 4
 
-        self.info(f"received section {cur_section} / {last_section} of table_id {table_id}")
+        self.verbose(f"received section {cur_section} / {last_section} of table_id {table_id}")
 
         if self.on_section(cur_section, self.payload[offset: offset+payload_length], crc32):
             self.sections_crc[cur_section] = crc32
 
         if not self.table_complete and len(self.sections_crc.keys()) == self.last_section + 1:
-            self.info(f"table {table_id} is complete")
+            self.verbose(f"table {table_id} is complete")
             self.on_table_complete()
             self.table_complete = True
         else:
@@ -181,11 +179,9 @@ class PsiTableReader(LogEnabled, TsReader):
         offset = 0
         first = True
 
-        self.info(f"parse_sections {self.payload.hex()}")
-
         while left > 3:
             if not first and self.payload[offset] & 0xFF == 0xFF:
-                self.debug("discard padding after section: %d", left)
+                self.verbose("discard padding after section: %d", left)
                 left = 0
                 break
 
@@ -193,7 +189,7 @@ class PsiTableReader(LogEnabled, TsReader):
 
             # make sure we have a complete section
             if left - 3 < section_length:
-                self.debug("section not complete (%d vs %d)", left - 3, section_length)
+                self.verbose("section not complete (%d vs %d)", left - 3, section_length)
                 break
 
             self.verbose(f"section_length {section_length}")
