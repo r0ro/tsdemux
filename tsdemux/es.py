@@ -69,14 +69,168 @@ class Es(LogEnabled):
         "spa": "Espagnol",
     }
 
+    class DescriptorParseException(Exception):
+        pass
+
+    class Descriptor:
+        def __init__(self, es, tag, data, offset, cur_len):
+            self.tag = tag
+            self.data = data[offset:offset+cur_len]
+
+        def __str__(self):
+            return f"[UNKNOWN: 0x{self.tag:02x} ({self.tag}) len: {len(self.data)} 0x{self.data.hex()}"
+
+    class TeletextDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            es.priv_stream_type = Es.DESCRIPTOR_TAG_TELETEXT
+            es.media_type = Es.MEDIA_TYPE_SUBTITLE
+            es.name = "[SRT] Teletext subtitle"
+            if cur_len < 5:
+                raise Es.DescriptorParseException(f"missing subtitle information: {cur_len}")
+
+            left = cur_len
+            off = offset
+            self.langs = {}
+
+            while left >= 5:
+                lang = data[off:off + 3].decode('ascii')
+                off += 3
+                teletext_type = data[off] >> 3
+                teletext_magazine_number = data[off] & 0x7
+                off += 1
+                teletext_page_number = data[off]
+                off += 1
+                left -= 5
+                self.langs[lang] = {
+                    "type": teletext_type,
+                    "magazine_number": teletext_magazine_number,
+                    "page_number": teletext_page_number,
+                }
+                es.name += " | " + Es.LANG_NAMES.get(lang, lang)
+
+        def __str__(self):
+            desc = "[Teletext Subtitle:"
+            for lang, infos in self.langs.items():
+                lang_str = Es.LANG_NAMES.get(lang, lang)
+                desc += f"LANG {lang_str}, type: {infos['type']}, " \
+                        f"magazine_number: {infos['magazine_number']}, " \
+                        f"page_number: {infos['page_number']}"
+            desc += "]"
+            return desc
+
+    class DvbSubtitleDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            es.priv_stream_type = Es.DESCRIPTOR_TAG_DVB_SUBTITLE
+            es.media_type = Es.MEDIA_TYPE_SUBTITLE
+            es.name = "[SRT] Dvb subtitle"
+            if cur_len < 8:
+                raise Es.DescriptorParseException(f"missing subtitle information: {cur_len}")
+
+            left = cur_len
+            off = offset
+            self.langs = {}
+
+            while left >= 8:
+                lang = data[off:off + 3].decode('ascii')
+                off += 3
+                subtitling_type = data[off] & 0xFF
+                off += 1
+                composition_page_id = data[off] << 8 | data[off + 1]
+                off += 2
+                ancillary_page_id = data[off] << 8 | data[off + 1]
+                off += 2
+                left -= 8
+                self.langs[lang] = {
+                    "subtitling_type": subtitling_type,
+                    "composition_page_id": composition_page_id,
+                    "ancillary_page_id": ancillary_page_id,
+                }
+                es.name += " | " + Es.LANG_NAMES.get(lang, lang)
+
+        def __str__(self):
+            desc = "[DVB Subtitle:"
+            for lang, infos in self.langs.items():
+                lang_str = Es.LANG_NAMES.get(lang, lang)
+                desc += f" LANG {lang_str}, type: {infos['subtitling_type']}, " \
+                        f"composition_page_id: {infos['composition_page_id']}, " \
+                        f"ancillary_page_id: {infos['ancillary_page_id']}"
+            desc += "]"
+            return desc
+
+    class CaDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+
+            if tag in es.descriptors:
+                raise Es.DescriptorParseException("a ca descriptor is already present")
+
+            if cur_len < 4:
+                raise Es.DescriptorParseException(f"too short ca_descriptor: {cur_len}")
+
+            self.ca_system_id = ((data[offset] & 0xFF) << 8) | (data[offset + 1] & 0xFF)
+            self.ca_pid = (data[offset + 2] & 0x1F) | (data[offset + 3] & 0xFF)
+
+        def __str__(self):
+            return f"[CA: system {self.ca_system_id} | pid: 0x{self.ca_pid:04x}]"
+
+    class LanguageDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            if cur_len != 4:
+                raise Es.DescriptorParseException(f"unexpected language descriptor len: {cur_len}")
+            self.lang = data[offset:offset + 3].decode('ascii')
+            es.langs.append(self.lang)
+            offset += 3
+            self.audio_type = data[offset]
+            es.name += " | " + es.LANG_NAMES.get(self.lang, self.lang)
+
+        def __str__(self):
+            return f"[LANG: {self.lang}, audio_type {self.audio_type}]"
+
+    class StreamIdentifierDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            self.identifier = data[offset:offset + cur_len]
+
+        def __str__(self):
+            return f"[STREAM_ID: {self.identifier.hex()}"
+
+    class PrivAudioDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            es.priv_stream_type = tag
+            es.media_type = Es.MEDIA_TYPE_AUDIO
+            es.name = f"[AUD] AC3 or DTS (0x{tag:02x})"
+
+    class Scte35CueDescriptor(Descriptor):
+        def __init__(self, es, tag, data, offset, cur_len):
+            super().__init__(es, tag, data, offset, cur_len)
+            self.cue_stream_type = data[offset]
+
+        def __str__(self):
+            return f"[SCTE35 cue type: {self.cue_stream_type}]"
+
+    DESCRIPTOR_TAG_TO_CLASS = {
+        DESCRIPTOR_TAG_CA: CaDescriptor,
+        DESCRIPTOR_TAG_DVB_SUBTITLE: DvbSubtitleDescriptor,
+        DESCRIPTOR_TAG_LANGUAGE: LanguageDescriptor,
+        DESCRIPTOR_TAG_TELETEXT: TeletextDescriptor,
+        DESCRIPTOR_TAG_STREAM_IDENTIFIER: StreamIdentifierDescriptor,
+        DESCRIPTOR_TAG_AC_3: PrivAudioDescriptor,
+        DESCRIPTOR_TAG_ENHANCED_AC_3: PrivAudioDescriptor,
+        DESCRIPTOR_TAG_DTS: PrivAudioDescriptor,
+        DESCRIPTOR_TAG_SCTE35_CUE: Scte35CueDescriptor,
+    }
+
     def __init__(self, pid: int, stream_type: int, descriptors: bytearray):
         super().__init__()
         self.log_prefix = "[ES:%04d] " % pid
         self.pid = pid
         self.stream_type = stream_type
         self.media_type = self.MEDIA_TYPE_UNKNOWN
-        self.ca_pid = -1
-        self.ca_system_id = -1
+        self.descriptors = {}
         self.name = ""
         self.langs = []
         self.priv_stream_type = -1
@@ -96,6 +250,16 @@ class Es(LogEnabled):
 
         self.process_descriptor(descriptors)
 
+    def parse_descriptor(self, tag, data, offset, cur_len):
+        try:
+            if tag in self.DESCRIPTOR_TAG_TO_CLASS:
+                return self.DESCRIPTOR_TAG_TO_CLASS[tag](self, tag, data, offset, cur_len)
+            else:
+                return self.Descriptor(self, tag, data, offset, cur_len)
+        except Es.DescriptorParseException as e:
+            self.warning(f"failed to parse descriptor {e}")
+            return None
+
     def process_descriptor(self, data: bytearray):
         desc_len = len(data)
         offset = 0
@@ -112,97 +276,13 @@ class Es(LogEnabled):
             self.verbose("descriptor: 0x%02x (%d) len: %d %s", tag, tag,
                          cur_len, data[offset:offset+cur_len].hex())
 
-            if tag == self.DESCRIPTOR_TAG_CA:
-                if cur_len < 4:
-                    self.warning(f"too short ca_descriptor: {cur_len}")
-                else:
-                    ca_system_id = ((data[offset] & 0xFF) << 8) | (data[offset+1] & 0xFF)
-                    self.verbose("ca_system_id: 0x%04x", ca_system_id)
-                    ca_pid = (data[offset+2] & 0x1F) | (data[offset+3] & 0xFF)
-                    self.verbose("ca_pid: %d (0x%04x)", ca_pid, ca_pid)
-                    if self.ca_pid > 0:
-                        self.error(f"es already has a ca pid defined: {self.ca_pid} vs {ca_pid}")
-                    else:
-                        self.ca_pid = ca_pid
-                        self.ca_system_id = ca_system_id
-            elif tag == self.DESCRIPTOR_TAG_LANGUAGE:
-                if cur_len != 4:
-                    self.warning(f"unexpected language descriptor length: {cur_len}")
-                else:
-                    self.langs = []
-                    lang = data[offset:offset+3].decode('ascii')
-                    self.langs.append(lang)
-                    offset += 3
-                    audio_type = data[offset]
-                    self.name += " | " + self.LANG_NAMES.get(lang, lang)
-                    self.verbose(f"name: {self.name} | audio type: {audio_type}")
-            elif tag == self.DESCRIPTOR_TAG_STREAM_IDENTIFIER:
-                self.info(f"stream identifier: {data[offset:offset+cur_len].hex()}")
-            elif tag in (self.DESCRIPTOR_TAG_AC_3, self.DESCRIPTOR_TAG_ENHANCED_AC_3, self.DESCRIPTOR_TAG_DTS):
-                self.priv_stream_type = tag
-                self.media_type = self.MEDIA_TYPE_AUDIO
-                self.name = "[AUD] AC3 or DTS (0x%02x)" % tag
-            elif tag == self.DESCRIPTOR_TAG_TELETEXT:
-                self.priv_stream_type = tag
-                self.media_type = self.MEDIA_TYPE_SUBTITLE
-                self.name = "[SRT] Teletext subtitle"
-                if cur_len < 5:
-                    self.warning("missing subtitle information")
-                else:
-                    left = cur_len
-                    off = offset
-                    self.langs = []
-                    while left >= 5:
-                        lang = data[off:off+3].decode('ascii')
-                        self.langs.append(lang)
-                        off += 3
-                        teletext_type = data[off] >> 3
-                        teletext_magazine_number = data[off] & 0x7
-                        off += 1
-                        teletext_page_number = data[off]
-                        off += 1
-                        left -= 5
-                        self.name += " | " + self.LANG_NAMES.get(lang, lang)
-                        self.verbose(f"lang: {lang}, type: {teletext_type}, "
-                                     f"teletext_magazine_number: {teletext_magazine_number}, "
-                                     f"teletext_page_number: {teletext_page_number}")
-            elif tag == self.DESCRIPTOR_TAG_DVB_SUBTITLE:
-                self.priv_stream_type = tag
-                self.media_type = self.MEDIA_TYPE_SUBTITLE
-                self.name = "[SRT] Dvb subtitle"
-                if cur_len < 8:
-                    self.warning("missing subtitle information")
-                else:
-                    left = cur_len
-                    off = offset
-                    self.langs = []
-                    while left >= 8:
-                        lang = data[off:off+3].decode('ascii')
-                        self.langs.append(lang)
-                        off += 3
-                        subtitling_type = data[off] & 0xFF
-                        off += 1
-                        composition_page_id = data[off] << 8 | data[off + 1]
-                        off += 2
-                        ancillary_page_id = data[off] << 8 | data[off + 1]
-                        off += 2
-                        left -= 8
-                        self.name += " | " + self.LANG_NAMES.get(lang, lang)
-                        self.verbose(f"lang: {lang}, type: {subtitling_type}, "
-                                     f"composition_page_id: {composition_page_id}, "
-                                     f"ancillary_page_id: {ancillary_page_id}")
-            elif tag == self.DESCRIPTOR_TAG_SCTE35_CUE:
-                cue_stream_type = data[offset]
-                self.verbose(f"SCTE 35 cue type: {cue_stream_type}")
-            else:
-                self.info("unknown descriptor: 0x%02x (%d) len: %d %s", tag, tag,
-                          cur_len, data[offset:offset+cur_len].hex())
+            descriptor = self.parse_descriptor(tag, data, offset, cur_len)
+            if descriptor is not None:
+                self.descriptors[tag] = descriptor
+                self.info(f"  - {descriptor}")
 
             offset += cur_len
             desc_len -= 2 + cur_len
 
     def __str__(self):
-        desc = "[ES:%d|0x%04x] (stream_type: 0x%02x) %s" % (self.pid, self.pid, self.stream_type, self.name)
-        if self.ca_pid > 0:
-            desc += f" | ECM pid: {self.ca_pid}"
-        return desc
+        return "[ES:%d|0x%04x] (stream_type: 0x%02x) %s" % (self.pid, self.pid, self.stream_type, self.name)
