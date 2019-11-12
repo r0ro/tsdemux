@@ -1,4 +1,3 @@
-import sys
 from typing import Callable
 
 from tsdemux.es import Es
